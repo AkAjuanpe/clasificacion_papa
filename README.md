@@ -1,6 +1,8 @@
 # clasificacion_papa
 Codigo fuente de un modelo de clasificacion de cultivos basado en el sudeste de la provincia de Buenos Aires, Argentina. Desarrollado en Google Earth Engine, utilizando datos reales y un algoritmo de Random Forest para la clasificación.
 
+Se comparte el link de snapshot de GEE: https://code.earthengine.google.com/30fba256dcfd809b01cdaea08cb293b4
+
 En el codigo fuente "table 4" indica la region en la que se centra el proyecto, en este caso se utilizo un poligono que delimitaba ciertos partidos de la zona.
 
 Por otro lado, "table 3" es el buffer de información sobre cultivos y diferentes superficies en la zona, solo la parte de entrenamiento, es decir, un 70%.
