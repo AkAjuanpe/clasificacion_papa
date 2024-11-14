@@ -1,0 +1,333 @@
+var region = ee.FeatureCollection(table4);
+var buffer = ee.FeatureCollection(table3);
+var trainset = ee.FeatureCollection(table3)
+
+// Definir una paleta de colores para diferentes tipos de cultivos
+var colorClase = {
+  'PAPA': 'red',
+  'INVIERNO': 'blue',
+  'NYP': 'limegreen',
+  'MAIZ': 'yellow',
+  'DOBLE2': 'purple',
+  'GIRASOL':'orange',
+  'DOBLE CULTIVO':'palegreen',
+  'VERANO':'turquoise',
+  'OTRO':'Fuchsia',
+  'URBANO':'black',
+  'AGUA':'navy',
+  'FORESTAL':'darkgreen',
+  'PIEDRA':'gray'
+};
+//Lista con las fechas seleccionadas
+var meses = {
+  'ago': '2023-08-01',
+  'ago2': '2023-08-15',
+  'sep': '2023-09-01',
+  'sep2': '2023-09-15',
+  'oct': '2023-10-01',
+  'oct2': '2023-10-15',
+  'nov': '2023-11-01',
+  'nov2': '2023-11-15',
+  'dic': '2023-12-01',
+  'dic2': '2023-12-15',
+  'ene': '2024-01-01',
+  'ene2': '2024-01-15',
+  'feb': '2024-02-01',
+  'feb2': '2024-02-15',
+  'mar': '2024-03-01',
+  'mar2': '2024-03-15',
+  'abr': '2024-04-01',
+  'abr2': '2024-04-15',
+  'may': '2024-05-01',
+  'may2': '2024-05-15'
+};
+
+// Crear una función para asignar colores a los polígonos según el valor de la columna 'cultivo'
+var EstiloPoligono = function(poligono) {
+    var Cultivos = poligono.get('Cobertura');
+    var color = ee.Dictionary(colorClase).get(Cultivos, 'grey'); // Por defecto usa 'grey' si no encuentra el cultivo
+    return poligono.set('style', {
+      'color': color,
+      'width': 1,
+      'fillColor': color //+ '66' // Colores semitransparentes
+      });
+};// Aplicar la función a cada característica del FeatureCollection
+var buffer = buffer.map(EstiloPoligono);
+/**** SENTINEL 2 ****/
+//Función de enmascaramiento de nubes
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  // Bits 10 and 11 son clouds and cirrus, respectivamente.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  // Ambas banderas seran seteadas a cero, indicando condiciones climaticas despejadas.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000);
+                           }
+//Definición de parámetros para visualizar una imagen con B4, B3 y B2 
+var parametros = { 
+  max: 1.0, 
+  min: 0, 
+  palette: ['CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901', '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01', '012E01', '011D01', '011301']
+};
+var visualization = {
+  min: 0.0,
+  max: 0.3,
+  bands: ['B4' , 'B3', 'B2'],
+};
+/****INDICES****/
+var calculoNDVI = function(image) {
+  return image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+};
+var calculoEVI = function(image) {
+   return image.expression('float (2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)))', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }).rename('EVI');
+};
+var calculoSAVI = function(image) {
+  return image.expression('float (((NIR - RED) / (NIR + RED + 0.428))* (1.428))',{
+      'NIR': image.select('B8'),
+      'RED': image.select('B4')
+    }).rename('SAVI');
+};
+var calculoGNDVI = function(image) {
+   return image.normalizedDifference(['B8', 'B3']).rename('GNDVI');
+};
+var calculoNDWI = function(image) {
+  return image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+};
+var calculoNDMI = function(image) {
+  return image.normalizedDifference(['B8', 'B11']).rename('NDWI');
+};
+var calculoBSI = function(image) {
+  return image.expression(
+    '((SWIR + RED) - (NIR + BLUE)) / ((SWIR + RED)+(NIR + BLUE))', 
+    {
+      'SWIR': image.select('B11'),
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }).rename('BSI');
+};
+var calculoARVI = function(image) {
+  return image.expression(
+    '(NIR - (2 * RED) + BLUE) / ( NIR + ( 2* RED) + BLUE)', 
+    {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }).rename('ARVI');
+};
+
+
+//Función de filtro de fecha, area, nubosidad y seleccion de bandas, mean
+var preprocColecImg = function(colleccion, fechaInicio, fechaFin) {
+  return ee.ImageCollection(colleccion)
+    .filterDate(fechaInicio, fechaFin)
+    .filterBounds(region)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+    .map(maskS2clouds);
+    //.select (['B2','B3','B4','B8','B11','QA60'])
+    //.mean();
+};
+//Generacioón de una lista para guardar las imagenes
+var conjImag2 = {};
+var conjImag = {};
+var bandasCompleto = ee.Image().float().clip(region);
+//Generación de una imagen quincenal
+//*** Tendriamos que poner si las imagenes son antes del 30 de sep calcular el mean,
+//*** Si las imagenes son en Octubre y Noviembre el min, lo que resaltaria el suelo desnudo
+//*** Si las imagenes son de Diciembre a Marzo habria que calcular el max
+//*** Si las imagenes son de Abril y mayo, el mean
+Object.keys(meses).forEach(function(key) {
+  conjImag2[key] = preprocColecImg(
+    'COPERNICUS/S2_SR_HARMONIZED',
+    meses[key], 
+    ee.Date(meses[key]).advance(15, 'day').format('YYYY-MM-dd')
+    );
+  var month = ee.Date(meses[key]).get('month')
+  if (month.eq(10).or(month.eq(11))) {
+    conjImag[key] = conjImag2[key].min();// tener los valores minimos para ver suelo desnudo
+    }
+    else if (month.eq(12).or(month.eq(1)).or(month.eq(2))) {
+      conjImag[key] = conjImag2[key].max();//tener los valores maximos de reflectancia
+      }
+      else if (month.eq(4).or(month.eq(5)).or(month.eq(8)).or(month.eq(9))) {
+        conjImag[key] = conjImag2[key].mean();
+      }
+  conjImag[key] = conjImag[key] .select(['B2', 'B3', 'B4', 'B8', 'B11']);
+  conjImag[key] = conjImag[key].addBands(calculoNDVI(conjImag[key]).rename('NDVI_' + key))
+                               .addBands(calculoEVI(conjImag[key]).rename('EVI_' + key))
+                               .addBands(calculoSAVI(conjImag[key]).rename('SAVI_' + key))
+                               .addBands(calculoNDWI(conjImag[key]).rename('NDWI_' + key))
+                               .addBands(calculoGNDVI(conjImag[key]).rename('GNDVI_' + key))
+                               .addBands(calculoNDMI(conjImag[key]).rename('NDMI_' + key))
+                               .addBands(calculoBSI(conjImag[key]).rename('BSI_' + key))
+                               .addBands(calculoARVI(conjImag[key]).rename('ARVI_' + key));
+  
+  conjImag[key] = conjImag[key].select(['B2', 'B3', 'B4', 'B8', 'B11'])
+                               .rename([('B2_' + key), ('B3_' + key), ('B4_' + key), ('B8_' + key), ('B11_' + key)])
+                               .addBands(conjImag[key].select([('NDVI_' + key),('EVI_' + key), ('SAVI_' + key), ('NDWI_' + key), ('GNDVI_' + key), ('NDMI_' + key), ('BSI_' + key), ('ARVI_' + key)]));
+  Map.addLayer(conjImag[key],{min: 0.0, max: 0.3, bands: ['B4_' + key, 'B3_'+ key, 'B2_'+ key]}, 'RGB'+ key, 0);
+  bandasCompleto = ee.Image.cat(bandasCompleto,conjImag[key]);
+});
+var bandsToRemoveS1 = ['constant',
+                     'B2_feb', 'B3_feb', 'B4_feb', 'B8_feb', 'B11_feb', 'NDVI_feb', 'EVI_feb', 'SAVI_feb', 'NDWI_feb', 'GNDVI_feb', 'NDMI_feb', 'BSI_feb', 'ARVI_feb',
+                     'B2_abr', 'B3_abr', 'B4_abr', 'B8_abr', 'B11_abr', 'NDVI_abr', 'EVI_abr', 'SAVI_abr', 'NDWI_abr', 'GNDVI_abr', 'NDMI_abr', 'BSI_abr', 'ARVI_abr',
+                     'B2_abr2', 'B3_abr2', 'B4_abr2', 'B8_abr2', 'B11_abr2', 'NDVI_abr2', 'EVI_abr2', 'SAVI_abr2', 'NDWI_abr2', 'GNDVI_abr2', 'NDMI_abr2', 'BSI_abr2', 'ARVI_abr2',
+                     'B2_may2', 'B3_may2', 'B4_may2', 'B8_may2', 'B11_may2', 'NDVI_may2', 'EVI_may2', 'SAVI_may2', 'NDWI_may2', 'GNDVI_may2', 'NDMI_may2', 'BSI_may2', 'ARVI_may2'];
+var Sentinel_completo = bandasCompleto.bandNames().removeAll(bandsToRemoveS1);
+var Sentinel_final = bandasCompleto.select(Sentinel_completo);
+print('Sentinel_final',Sentinel_final);
+
+
+/****SENTINEL 1****/
+
+function filterSpecklesVV(img) {
+  var vv = img.select('VV'); //select the VV polarization band
+  var vv_smoothed = vv.focal_median(100,'circle','meters').rename('VV_Filtered'); //Apply a focal median filter
+  var vv_smoothedf = vv_smoothed.toFloat();
+  return (vv_smoothedf);
+  }
+function filterSpecklesVH(img) {
+  var vh = img.select('VH'); //select the VH polarization band
+  var vh_smoothed = vh.focal_median(100,'circle','meters').rename('VH_Filtered'); //Apply a focal median filterreturn img.addBands(vv_smoothed); // Add filtered VV band to original image
+  var vh_smoothedf = vh_smoothed.toFloat();
+  return (vh_smoothedf);
+  }
+// Función para eliminar la banda del ángulo
+function removeAngleBand(image) {
+  // Obtener los nombres de todas las bandas
+  var bandNames = image.bandNames();
+  
+  // Filtrar los nombres de las bandas para excluir las que contienen 'angle'
+  var filteredBandNames = bandNames.filter(ee.Filter.stringContains('item', 'angle').not());
+  
+  // Seleccionar únicamente las bandas que no contienen 'angle'
+  var imageWithoutAngle = image.select(filteredBandNames);
+  
+  return imageWithoutAngle;
+}
+/*Soil Water Index o Índice de Agua en el Suelo
+El valor de SWI oscila entre -1 y +1.
+Valores más cercanos a 1 indican una mayor humedad en el suelo.
+Valores cercanos a 0 indican condiciones de sequedad.
+Valores negativos pueden estar relacionados con la vegetación densa o el agua libre, dependiendo de las condiciones de la imagen.
+*/
+var calculoSWI = function(image) {
+  return image.expression(
+    'float ((0.1747 * BVV) + (0.0082* BVH* BVV) + ((0.0023*BVV)*(0.0023*BVV)) - ((0.0015*BVH)*(0.0015*BVH))+ 0.1904)', 
+    {
+      'BVV': image.select('VV'),
+      'BVH': image.select('VH')
+    }).rename('SWI');
+};
+var preprocColecImgSAR = function(colleccion, fechaInicio, fechaFin) {
+  return ee.ImageCollection(colleccion)
+    .filterDate(fechaInicio, fechaFin)
+    .filterBounds(region)
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+    .mean()
+    .toFloat();
+};
+var conjImagSAR = {};
+var visualization2 = {
+  min: -18,
+  max: 0,
+  bands: ['VV', 'VH', 'VV'],
+};
+Object.keys(meses).forEach(function(key) {
+  conjImagSAR[key] = preprocColecImgSAR(
+    'COPERNICUS/S1_GRD',
+    meses[key], 
+    ee.Date(meses[key]).advance(15, 'day').format('YYYY-MM-dd')
+    );
+  Map.addLayer(conjImagSAR[key], visualization2, 'SAR'+ key,0);
+});
+var listaIndicesSAR = [];
+Object.keys(conjImagSAR).forEach(function(key) {
+  var img = conjImagSAR[key]
+  var imgVV = filterSpecklesVV(img).rename("VVF_"+key)
+  var imgVH = filterSpecklesVH(img).rename("VHF_"+key)
+  //var imgwater = classifyWater(imgVV).rename("VVF_"+key, "WTR_"+key)
+  var imgswi = calculoSWI(img).rename("SWI_"+key)
+  img = img.rename("VV_"+key,"VH_"+key,"angle")
+  img = removeAngleBand(img);
+  var listaIndices = img.addBands([imgVH,imgVV,imgswi])
+  listaIndicesSAR.push(listaIndices)
+});
+var SARcompleto1 = ee.Image.cat(listaIndicesSAR);
+print ('SAR Completo',SARcompleto1)
+// Eliminar las bandas de la 1era quincena de octubre y marzo, xq no presenta imagen
+var bandsToRemove = ['VV_oct', 'VH_oct','VHF_oct','VVF_oct','SWI_oct','VV_mar','VH_mar','VHF_mar','VVF_mar','SWI_mar'];
+var SARcompleto_list_name = SARcompleto1.bandNames().removeAll(bandsToRemove);
+var SARcompleto = SARcompleto1.select(SARcompleto_list_name);
+
+/*** Generacion de una unica imagen multitemporal y multiespectral ****/
+var ImagenFinal = ee.Image.cat(Sentinel_final,SARcompleto);
+print("Imagen Final", ImagenFinal);
+
+var visualization = {
+  min: 0,
+  max: 1,
+  gamma:1.9,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+/****MODULO PARA CLASIFICAR*****/
+
+var bandas = ImagenFinal.bandNames();
+print("Bandas", bandas);
+
+//scale:30 debería ser de 10 m.
+var roitrain = ImagenFinal.select(bandas)
+                        .sampleRegions({collection:trainset,
+                                        properties:['COD'],
+                                        scale:100
+});
+
+var roitrain2 = roitrain.randomColumn("RND", 10);
+
+var trainset2 = roitrain2.filter(ee.Filter.lte('RND',0.5));
+
+print ('roitrain',roitrain);
+
+var parametros = {
+  numberOfTrees: 100, 
+  minLeafPopulation: 10, 
+  seed: 1500
+};
+print ('trainset',trainset)
+
+var rf_fit = ee.Classifier.smileRandomForest(parametros)
+                          .train
+                          ({
+                            features: roitrain, //Este parámetro es un FeatureCollection que contiene las características de entrenamiento. Cada Feature en la colección debe tener una propiedad de clase (o etiqueta) que se utiliza para entrenar el clasificador.
+                            classProperty: 'COD', //Especifica el nombre de la propiedad en los Feature que contiene las etiquetas de clase para el entrenamiento. Esta propiedad se usa para asignar las clases a los píxeles de entrenamiento
+                            inputProperties: bandas //Las propiedades de entrada que se usan para el entrenamiento del clasificador (por ejemplo, bandas de imágenes satelitales).
+                            })
+                            
+var clasificacion = ImagenFinal.classify(rf_fit);
+
+print ("clasificacion",clasificacion);
+
+Export.image.toDrive ({
+  image: clasificacion,
+  description: 'clasificacion',
+  scale: 10,
+  maxPixels: 1e10,
+  region: region // si dispondes de una zona AOI para recortar los limites de la imafen con ese poligono
+})
+
+/****VISUALIZACION****/
+
+//Map.addLayer(setimagenes, visualization, 'RGB',false);
+//Map.addLayer(region,{min: 0, max: 10, palette: ['FF0000', 'FFFF00','#00FF00','00FFFF', '0000FF', 'FF00FF','008080','C0C0C0','000000','808080' ]},'Area de Estudio')
+Map.addLayer(region.style({fillColor: "FF000000"}), {}, 'Partidos');
+Map.addLayer(buffer.style({styleProperty: 'style'}), {}, 'Relevamiento');
+Map.addLayer(clasificacion, {}, 'clasificacion');
+Map.setCenter(-58.220260577, -37.8272392830, 10);
